@@ -1,0 +1,9 @@
+{
+  "name": "GMANOOY",
+  "description": "An intelligent AI platform for natural, human-like voice interaction in Egyptian Arabic, featuring live chat, storytelling, podcast creation, and real-time information.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera",
+    "display-capture"
+  ]
+}

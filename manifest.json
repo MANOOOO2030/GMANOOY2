@@ -1,0 +1,51 @@
+{
+  "id": "com.gmanooy.ai",
+  "name": "GMANOOY AI Platform",
+  "short_name": "Gemanoy",
+  "description": "Intelligent AI Voice Platform in Egyptian Arabic by Mano Habib",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "categories": ["productivity", "ai", "utilities"],
+  "lang": "ar",
+  "dir": "rtl",
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/1698/1698535.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/1698/1698535.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/1698/1698535.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "https://cdn-icons-png.flaticon.com/512/1698/1698535.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "https://img.freepik.com/free-vector/gradient-ui-ux-background_23-2149051557.jpg",
+      "sizes": "1080x1920",
+      "type": "image/jpg",
+      "form_factor": "narrow",
+      "label": "GMANOOY Chat View"
+    }
+  ]
+}
