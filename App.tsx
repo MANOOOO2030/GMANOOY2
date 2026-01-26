@@ -42,6 +42,22 @@ const App: React.FC = () => {
         document.body.className = theme === 'dark' ? 'bg-black text-white' : 'bg-gray-50 text-black';
     }, [theme, appLanguage]);
 
+    // Handle PWA Install Prompt
+    useEffect(() => {
+        const handleBeforeInstallPrompt = (e: any) => {
+            // Prevent the mini-infobar from appearing on mobile
+            e.preventDefault();
+            // Stash the event so it can be triggered later.
+            setDeferredPrompt(e);
+        };
+
+        window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+
+        return () => {
+            window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+        };
+    }, []);
+
     const initAudio = () => {
         if (!audioContext) {
             const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -108,7 +124,16 @@ const App: React.FC = () => {
                         onVoiceChange={handleVoiceChange} 
                         playGreeting={playGreeting} 
                         installPrompt={deferredPrompt} 
-                        onInstall={() => deferredPrompt?.prompt()} 
+                        onInstall={() => {
+                            if (deferredPrompt) {
+                                deferredPrompt.prompt();
+                                deferredPrompt.userChoice.then((choiceResult: any) => {
+                                    if (choiceResult.outcome === 'accepted') {
+                                        setDeferredPrompt(null);
+                                    }
+                                });
+                            }
+                        }} 
                         T={T} 
                         menuPosition="top" // Expands downward
                     />
