@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GoogleGenAI, LiveSession, LiveServerMessage, Modality } from "@google/genai";
-import { decode, decodeAudioData, encode, generateImage, getApiKey } from '../services/geminiService';
+import { decode, decodeAudioData, encode, generateImage, generateVideo, getApiKey } from '../services/geminiService';
 import { translations } from '../translations';
 import type { Voice, ChatMessage } from '../types';
 import { 
@@ -9,9 +9,7 @@ import {
     Control3DIcon,
     XMarkIcon, 
     ShareIcon,
-    Spinner,
     DownloadIcon,
-    VideoCameraIcon
 } from './IconComponents';
 import LuminousWavesBackground from './LuminousWavesBackground';
 
@@ -43,6 +41,13 @@ const formatLinkSource = (url: string) => {
     } catch (e) { return 'Link'; }
 };
 
+interface TranscriptTurn {
+    role: 'user' | 'model';
+    text: string;
+    images?: string[];
+    videos?: string[]; // Store Veo URLs
+}
+
 const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessages }) => {
     // --- State ---
     const [status, setStatus] = useState<'connecting' | 'connected' | 'error' | 'closed'>('connecting');
@@ -53,6 +58,7 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
     
     // UI Overlays
     const [liveGeneratedImage, setLiveGeneratedImage] = useState<string | null>(null);
+    const [liveGeneratedVideo, setLiveGeneratedVideo] = useState<string | null>(null); // For GIF/Veo
     const [youtubeEmbedUrl, setYoutubeEmbedUrl] = useState<string | null>(null);
     const [suggestedLinks, setSuggestedLinks] = useState<{url: string, title: string}[]>([]);
     
@@ -74,42 +80,27 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
     const nextStartTimeRef = useRef(0);
     const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
     
-    // History Tracking (For Chatbot Integration)
-    const fullTranscriptRef = useRef<string>('');
-    const recentTranscriptBufferRef = useRef<string>('');
-    const sessionImagesRef = useRef<string[]>([]); // Stores base64 of images generated in session
-    const sessionVideosRef = useRef<Set<string>>(new Set()); // Stores video URLs played in session
+    // History Tracking
+    const transcriptHistoryRef = useRef<TranscriptTurn[]>([]);
+    const currentTurnRef = useRef<TranscriptTurn | null>(null);
 
-    // --- Helper: Initializing Audio Contexts Robustly ---
     const ensureAudioContexts = async () => {
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-        
-        // Input Context: Strict 16kHz for best STT performance with Gemini
         if (!inputAudioContextRef.current || inputAudioContextRef.current.state === 'closed') {
             inputAudioContextRef.current = new AudioContextClass({ sampleRate: 16000 });
         }
-        
-        // Output Context: Standard rate (usually 44.1 or 48kHz)
         if (!outputAudioContextRef.current || outputAudioContextRef.current.state === 'closed') {
             outputAudioContextRef.current = new AudioContextClass();
         }
-
-        // Resume if suspended (browser autoplay policy)
         if (inputAudioContextRef.current.state === 'suspended') await inputAudioContextRef.current.resume();
         if (outputAudioContextRef.current.state === 'suspended') await outputAudioContextRef.current.resume();
     };
 
-    // --- 1. Audio Stream Setup ---
     const initializeAudio = async () => {
         try {
             await ensureAudioContexts();
             const stream = await navigator.mediaDevices.getUserMedia({ 
-                audio: { 
-                    echoCancellation: true, 
-                    noiseSuppression: true, 
-                    autoGainControl: true,
-                    channelCount: 1 
-                }, 
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }, 
                 video: false 
             });
             audioStreamRef.current = stream;
@@ -122,7 +113,6 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
         }
     };
 
-    // --- 2. Video/Screen Logic ---
     const toggleScreenShare = async () => {
         if (videoMode === 'screen') {
             setVideoMode('off');
@@ -140,27 +130,18 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
 
     useEffect(() => {
         let activeStream: MediaStream | null = null;
-
         const setupVideo = async () => {
             if (localVideoRef.current) localVideoRef.current.srcObject = null;
-            
-            // Cleanup old stream
             if (videoStreamRef.current) { 
                 videoStreamRef.current.getTracks().forEach(t => t.stop()); 
                 videoStreamRef.current = null; 
             }
-
             if (videoMode === 'off') return;
 
             try {
                 if (videoMode === 'camera') {
                     activeStream = await navigator.mediaDevices.getUserMedia({
-                        video: { 
-                            facingMode: currentFacingMode, 
-                            width: { ideal: TRANSMISSION_WIDTH }, 
-                            height: { ideal: Math.round(TRANSMISSION_WIDTH * 0.75) },
-                            frameRate: { ideal: 15 } 
-                        },
+                        video: { facingMode: currentFacingMode, width: { ideal: TRANSMISSION_WIDTH }, height: { ideal: Math.round(TRANSMISSION_WIDTH * 0.75) }, frameRate: { ideal: 15 } },
                         audio: false
                     });
                 } else if (videoMode === 'screen') {
@@ -174,7 +155,6 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
                 }
 
                 if (!activeStream) { setVideoMode('off'); return; }
-
                 videoStreamRef.current = activeStream;
                 const videoTrack = activeStream.getVideoTracks()[0];
                 videoTrack.onended = () => setVideoMode('off');
@@ -184,65 +164,38 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
                     try { await localVideoRef.current.play(); } catch (e) {}
                 }
 
-                // Notify Model
                 if (sessionPromiseRef.current) {
-                    const msg = videoMode === 'camera' 
-                        ? "SYSTEM: [Camera Active]. Describe what you see." 
-                        : "SYSTEM: [Screen Share Active]. Analyze the screen.";
-                    sessionPromiseRef.current.then(session => session.sendRealtimeInput({ 
-                        content: { parts: [{ text: msg }], role: 'user' } 
-                    }));
+                    const msg = videoMode === 'camera' ? "SYSTEM: [Camera Active]. Describe what you see." : "SYSTEM: [Screen Share Active]. Analyze the screen.";
+                    sessionPromiseRef.current.then(session => session.sendRealtimeInput({ content: { parts: [{ text: msg }], role: 'user' } }));
                 }
-
             } catch (err: any) {
                 console.error("Video setup error:", err);
                 setVideoMode('off');
                 if (err.name === 'NotAllowedError') setErrorMsg(T.cameraPermissionDenied);
             }
         };
-
         setupVideo();
-        return () => { 
-            if (activeStream) activeStream.getTracks().forEach(t => t.stop()); 
-        };
+        return () => { if (activeStream) activeStream.getTracks().forEach(t => t.stop()); };
     }, [videoMode, currentFacingMode, T]);
 
-
-    // --- 3. Gemini Live Connection ---
     const connectToGemini = async (audioStream: MediaStream) => {
         try {
             const apiKey = getApiKey();
             if (!apiKey) throw new Error("API Key missing");
-            
             const ai = new GoogleGenAI({ apiKey });
             
             const liveConfig = {
                 responseModalities: [Modality.AUDIO],
-                speechConfig: { 
-                    voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice.apiName } } 
-                },
+                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: selectedVoice.apiName } } },
                 systemInstruction: `
-                    IDENTITY: You are **Gimanoui** (جمانوي), a helpful AI assistant.
-                    DEVELOPER: Developed by **Mano Habib**, an Egyptian developer.
+                    IDENTITY: You are **Gimanoui** (جمانوي), developed by **Mano Habib**.
+                    CAPABILITIES: Vision, Search, Image Gen, GIF/Video Gen.
                     
-                    LANGUAGES: You speak and understand **ALL languages and dialects** (English, French, Spanish, Chinese, Arabic dialects, etc.).
-                    - **ALWAYS match the user's language**.
-                    - If the user speaks Egyptian Arabic, reply in **Egyptian Colloquial Arabic**.
-                    - If they speak English, reply in English.
-                    
-                    CAPABILITIES & RULES:
-                    1. **OFFICIAL LINKS**: 
-                       - When asked for a song, video, or news, you **MUST** use the 'googleSearch' tool.
-                       - Find the **OFFICIAL** YouTube link or Verified News Site.
-                       - **ALWAYS** output the full URL in your response text.
-                    
-                    2. **IMAGES**: 
-                       - If asked to draw/create an image, say "Sure" (in the user's language) and output: [GENERATE_IMAGE: <English Prompt>]
-                    
-                    3. **VISION**: 
-                       - Describe camera/screen input if active.
-                    
-                    BEHAVIOR: Be fast, concise, and natural.
+                    RULES: 
+                    1. Be concise and fast.
+                    2. If asked for a song or video, use 'googleSearch' to find the **valid** YouTube link. Return the full link in your response.
+                    3. If asked for a GIF or animation, output [GENERATE_GIF: prompt].
+                    4. If asked to draw, output [GENERATE_IMAGE: prompt].
                 `,
                 outputAudioTranscription: {},
                 inputAudioTranscription: {},
@@ -250,7 +203,6 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
             };
 
             let isSessionActive = false;
-
             const sessionPromise = ai.live.connect({
                 model: LIVE_MODEL,
                 config: liveConfig as any,
@@ -260,13 +212,10 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
                         setStatus('connected');
                         isSessionActive = true;
                         setErrorMsg(null);
-
                         if (!inputAudioContextRef.current || !audioStream.active) return;
-
                         const source = inputAudioContextRef.current.createMediaStreamSource(audioStream);
                         const processor = inputAudioContextRef.current.createScriptProcessor(4096, 1, 1);
                         scriptProcessorRef.current = processor;
-
                         processor.onaudioprocess = (e) => {
                             if (!isSessionActive) return;
                             const inputData = e.inputBuffer.getChannelData(0);
@@ -277,16 +226,10 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
                             }
                             sessionPromise.then(session => {
                                 if (isSessionActive) {
-                                    session.sendRealtimeInput({
-                                        media: {
-                                            mimeType: `audio/pcm;rate=${inputAudioContextRef.current?.sampleRate}`,
-                                            data: encode(new Uint8Array(pcmData.buffer))
-                                        }
-                                    });
+                                    session.sendRealtimeInput({ media: { mimeType: `audio/pcm;rate=${inputAudioContextRef.current?.sampleRate}`, data: encode(new Uint8Array(pcmData.buffer)) } });
                                 }
                             });
                         };
-
                         source.connect(processor);
                         processor.connect(inputAudioContextRef.current.destination);
                     },
@@ -297,8 +240,6 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
                             nextStartTimeRef.current = 0;
                             return;
                         }
-
-                        // 1. Play Audio
                         const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
                         if (audioData && outputAudioContextRef.current) {
                             try {
@@ -314,69 +255,97 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
                                 source.onended = () => outputSourcesRef.current.delete(source);
                             } catch (e) { console.error("Audio decode error", e); }
                         }
-
-                        // 2. Process Text
+                        
+                        // --- Enhanced History Tracking ---
                         const modelText = msg.serverContent?.outputTranscription?.text;
                         const userText = msg.serverContent?.inputTranscription?.text;
-
-                        if (userText) fullTranscriptRef.current += `User: ${userText}\n`;
-                        if (modelText) {
-                            fullTranscriptRef.current += `Gemanoy: ${modelText}\n`;
-                            recentTranscriptBufferRef.current += modelText;
-                            if (recentTranscriptBufferRef.current.length > 1000) {
-                                recentTranscriptBufferRef.current = recentTranscriptBufferRef.current.slice(-1000);
+                        
+                        // Handle User Input
+                        if (userText) {
+                            // If we were tracking a model turn, finalize it
+                            if (currentTurnRef.current && currentTurnRef.current.role === 'model') {
+                                transcriptHistoryRef.current.push({...currentTurnRef.current});
+                                currentTurnRef.current = null;
                             }
-                            const buffer = recentTranscriptBufferRef.current;
+                            // Start or append to user turn
+                            if (!currentTurnRef.current || currentTurnRef.current.role !== 'user') {
+                                currentTurnRef.current = { role: 'user', text: '' };
+                            }
+                            currentTurnRef.current.text += userText;
+                        }
 
-                            // A. Detect Image Gen
+                        // Handle Model Output
+                        if (modelText) {
+                            // If we were tracking a user turn, finalize it
+                            if (currentTurnRef.current && currentTurnRef.current.role === 'user') {
+                                transcriptHistoryRef.current.push({...currentTurnRef.current});
+                                currentTurnRef.current = null;
+                            }
+                             // Start or append to model turn
+                            if (!currentTurnRef.current || currentTurnRef.current.role !== 'model') {
+                                currentTurnRef.current = { role: 'model', text: '' };
+                            }
+                            currentTurnRef.current.text += modelText;
+
+                            const buffer = currentTurnRef.current.text;
+
+                            // GIF/Video Command
+                            const gifMatch = buffer.match(/\[GENERATE_GIF:\s*(.*?)\]/);
+                            if (gifMatch && gifMatch[1]) {
+                                currentTurnRef.current.text = buffer.replace(gifMatch[0], '');
+                                handleGenerateVideo(gifMatch[1]);
+                            }
+
+                            // Image Command
                             const imgMatch = buffer.match(/\[GENERATE_IMAGE:\s*(.*?)\]/);
                             if (imgMatch && imgMatch[1]) {
-                                recentTranscriptBufferRef.current = buffer.replace(imgMatch[0], '');
+                                currentTurnRef.current.text = buffer.replace(imgMatch[0], '');
                                 handleGenerateImage(imgMatch[1]);
                             }
-
-                            // B. Detect Links
-                            const urlRegex = /(https?:\/\/[^\s]+)/g;
+                            
+                            // Improved Link Detection - Catch ALL URLs
+                            const urlRegex = /((?:https?:\/\/|www\.)[^\s]+)/g;
                             const matches = modelText.match(urlRegex);
                             if (matches) {
                                 matches.forEach(url => {
-                                    // Official YouTube Check
-                                    const ytMatch = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/);
+                                    // Clean URL
+                                    let cleanUrl = url.startsWith('http') ? url : `https://${url}`;
+                                    
+                                    // Extract ID for YouTube embed
+                                    const ytMatch = cleanUrl.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|v\/)|youtu\.be\/)([\w-]{11})/);
                                     if (ytMatch && ytMatch[1]) {
                                         setYoutubeEmbedUrl(`https://www.youtube.com/embed/${ytMatch[1]}?autoplay=1&rel=0`);
-                                        sessionVideosRef.current.add(url); // Save to history
                                     }
                                     
+                                    // Add to suggestions list (deduplicated)
                                     setSuggestedLinks(prev => {
-                                        if (prev.some(l => l.url === url)) return prev;
-                                        return [...prev, { url, title: formatLinkSource(url) }];
+                                        if (prev.some(l => l.url === cleanUrl)) return prev;
+                                        return [...prev, { url: cleanUrl, title: formatLinkSource(cleanUrl) }];
                                     });
                                 });
                             }
                         }
+
+                        // Handle Turn Complete explicit signal
+                        if (msg.serverContent?.turnComplete && currentTurnRef.current) {
+                            // Finalize current turn if it has content
+                            if (currentTurnRef.current.text.trim()) {
+                                transcriptHistoryRef.current.push({...currentTurnRef.current});
+                                currentTurnRef.current = null;
+                            }
+                        }
+
                     },
-                    onclose: () => { 
-                        isSessionActive = false;
-                        if (status !== 'closed') setStatus('error');
-                    },
-                    onerror: (err) => {
-                        console.error("Session Error", err);
-                        isSessionActive = false;
-                        setStatus('error');
-                        setErrorMsg("Connection Error");
-                    }
+                    onclose: () => { isSessionActive = false; if (status !== 'closed') setStatus('error'); },
+                    onerror: (err) => { isSessionActive = false; setStatus('error'); setErrorMsg("Connection Error"); }
                 }
             });
-
             sessionPromiseRef.current = sessionPromise;
-
-            // --- 4. Video Frame Loop ---
             let isFrameLoopActive = true;
             const sendFrameLoop = async () => {
                 if (!isFrameLoopActive || !isSessionActive) return;
                 const video = localVideoRef.current;
                 const canvas = canvasRef.current;
-                
                 if (videoStreamRef.current?.active && video && canvas && !video.paused && video.readyState >= 2 && !isSendingFrameRef.current) {
                     isSendingFrameRef.current = true;
                     try {
@@ -386,7 +355,6 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
                             canvas.width = TRANSMISSION_WIDTH;
                             canvas.height = TRANSMISSION_WIDTH * aspect;
                             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                            
                             const base64 = canvas.toDataURL('image/jpeg', JPEG_QUALITY).split(',')[1];
                             const session = await sessionPromise;
                             session.sendRealtimeInput({ media: { mimeType: 'image/jpeg', data: base64 }});
@@ -396,212 +364,221 @@ const LiveChat: React.FC<LiveChatProps> = ({ selectedVoice, T, onClose, setMessa
                 frameIntervalRef.current = setTimeout(sendFrameLoop, FRAME_INTERVAL_MS);
             };
             sendFrameLoop();
-
             return () => { isFrameLoopActive = false; isSessionActive = false; };
-
-        } catch (e: any) {
-            console.error("Connect failed", e);
-            setStatus('error');
-            setErrorMsg(e.message || "Failed to connect");
-        }
+        } catch (e: any) { setStatus('error'); setErrorMsg(e.message || "Failed to connect"); }
     };
 
-    // --- Actions ---
     const handleGenerateImage = async (prompt: string) => {
         try {
             const imageData = await generateImage(prompt, '1:1');
             if (imageData) {
                 setLiveGeneratedImage(`data:image/png;base64,${imageData}`);
-                sessionImagesRef.current.push(imageData); // Save to history
+                // Attach image to current model turn if active
+                if (currentTurnRef.current && currentTurnRef.current.role === 'model') {
+                     if (!currentTurnRef.current.images) currentTurnRef.current.images = [];
+                     currentTurnRef.current.images.push(imageData);
+                } else {
+                    const lastModelTurn = [...transcriptHistoryRef.current].reverse().find(t => t.role === 'model');
+                    if (lastModelTurn) {
+                        if (!lastModelTurn.images) lastModelTurn.images = [];
+                        lastModelTurn.images.push(imageData);
+                    }
+                }
             }
-        } catch (e) { console.error("Gen Image Error", e); }
+        } catch (e) { console.error("Image Gen Error", e); }
     };
 
-    const handleStart = async () => {
-        setStatus('connecting');
-        const stream = await initializeAudio();
-        if (stream) {
-            await connectToGemini(stream);
-        }
+    const handleGenerateVideo = async (prompt: string) => {
+        try {
+            const videoUrl = await generateVideo(prompt);
+            if (videoUrl) {
+                setLiveGeneratedVideo(videoUrl);
+                // Attach video to current model turn
+                 if (currentTurnRef.current && currentTurnRef.current.role === 'model') {
+                     if (!currentTurnRef.current.videos) currentTurnRef.current.videos = [];
+                     currentTurnRef.current.videos.push(videoUrl);
+                } else {
+                    const lastModelTurn = [...transcriptHistoryRef.current].reverse().find(t => t.role === 'model');
+                    if (lastModelTurn) {
+                        if (!lastModelTurn.videos) lastModelTurn.videos = [];
+                        lastModelTurn.videos.push(videoUrl);
+                    }
+                }
+            }
+        } catch (e) { console.error("Video Gen Error", e); }
     };
 
-    const handleClose = () => {
+    const handleDisconnect = () => {
         setStatus('closed');
         
-        // 1. Save History Logic (Text, Images, Videos)
-        if (fullTranscriptRef.current.trim() || sessionImagesRef.current.length > 0) {
-            
-            let historyText = `🎙️ **Live Session Summary:**\n\n${fullTranscriptRef.current}`;
-            
-            // Append Video Links to text so Chat component renders them
-            if (sessionVideosRef.current.size > 0) {
-                historyText += `\n\n🎥 **Played Videos:**\n`;
-                sessionVideosRef.current.forEach(url => {
-                    historyText += `- ${url}\n`;
-                });
-            }
-
-            const historyMessage: ChatMessage = {
-                id: `live-${Date.now()}`,
-                role: 'model',
-                text: historyText,
-                // Attach generated images
-                media: sessionImagesRef.current.length > 0 
-                    ? sessionImagesRef.current.map(b64 => ({ base64: b64, mimeType: 'image/png' }))
-                    : undefined
-            };
-
-            setMessages(prev => [...prev, historyMessage]);
+        // Finalize any pending turn
+        if (currentTurnRef.current && currentTurnRef.current.text.trim()) {
+            transcriptHistoryRef.current.push({...currentTurnRef.current});
         }
+        
+        const history = transcriptHistoryRef.current;
+        const newMessages: ChatMessage[] = history.map((turn, index) => {
+            const mediaItems = [];
+            if (turn.images) turn.images.forEach(b64 => mediaItems.push({ base64: b64, mimeType: 'image/png' }));
+            // Convert Video URL to media item for chat display (assuming mp4)
+            if (turn.videos) turn.videos.forEach(url => mediaItems.push({ base64: url, mimeType: 'video/mp4' }));
 
-        // 2. Cleanup Resources
-        if (frameIntervalRef.current) clearTimeout(frameIntervalRef.current);
-        if (sessionPromiseRef.current) sessionPromiseRef.current.then(s => s.close()).catch(() => {});
-        if (scriptProcessorRef.current) { scriptProcessorRef.current.disconnect(); scriptProcessorRef.current = null; }
-        if (inputAudioContextRef.current) inputAudioContextRef.current.close();
-        if (outputAudioContextRef.current) outputAudioContextRef.current.close();
-        if (audioStreamRef.current) audioStreamRef.current.getTracks().forEach(t => t.stop());
-        if (videoStreamRef.current) videoStreamRef.current.getTracks().forEach(t => t.stop());
+            return {
+                id: `live-${Date.now()}-${index}`,
+                role: turn.role,
+                text: turn.text.trim(),
+                media: mediaItems.length > 0 ? mediaItems : undefined
+            };
+        });
+
+        if (newMessages.length > 0) {
+            setMessages(prev => [...prev, ...newMessages]);
+        }
         
         onClose();
     };
 
     useEffect(() => {
-        const timer = setTimeout(() => handleStart(), 100);
-        return () => clearTimeout(timer);
+        let cleanupAudio: (() => void) | undefined;
+        initializeAudio().then(stream => {
+            if (stream) {
+                cleanupAudio = () => stream.getTracks().forEach(t => t.stop());
+                connectToGemini(stream);
+            }
+        });
+        return () => {
+            if (cleanupAudio) cleanupAudio();
+            if (scriptProcessorRef.current) { scriptProcessorRef.current.disconnect(); scriptProcessorRef.current = null; }
+            if (inputAudioContextRef.current) { inputAudioContextRef.current.close(); inputAudioContextRef.current = null; }
+            if (outputAudioContextRef.current) { outputAudioContextRef.current.close(); outputAudioContextRef.current = null; }
+            if (frameIntervalRef.current) clearTimeout(frameIntervalRef.current);
+            if (videoStreamRef.current) videoStreamRef.current.getTracks().forEach(t => t.stop());
+            if (pendingScreenStreamRef.current) pendingScreenStreamRef.current.getTracks().forEach(t => t.stop());
+        };
     }, []);
 
-    const isVideoVisible = videoMode !== 'off';
+    const removeLink = (index: number) => {
+        setSuggestedLinks(prev => prev.filter((_, i) => i !== index));
+    };
 
     return (
-        <div className="fixed inset-0 z-[100] bg-black flex flex-col items-center justify-center overflow-hidden">
-            
-            {/* BACKGROUND LAYER */}
-            <div className="absolute inset-0 z-0">
-                <video 
-                    ref={localVideoRef} 
-                    autoPlay 
-                    playsInline 
-                    muted 
-                    className={`absolute inset-0 w-full h-full object-contain bg-black transition-opacity duration-300 ${isVideoVisible ? 'opacity-100' : 'opacity-0'}`}
-                    style={{ transform: currentFacingMode === 'user' && videoMode === 'camera' ? 'scaleX(-1)' : 'none' }}
-                />
-                {!isVideoVisible && (
-                    <div className="absolute inset-0 z-10">
-                        <LuminousWavesBackground stream={audioStreamRef.current} />
+        <div className="absolute inset-0 z-50 bg-black flex flex-col overflow-hidden text-white font-sans">
+            {/* Background Layer: Visual Effect when Video is Off */}
+            <div className={`absolute inset-0 z-0 transition-opacity duration-500 ${videoMode === 'off' ? 'opacity-100' : 'opacity-0'}`}>
+                <LuminousWavesBackground stream={audioStreamRef.current} />
+            </div>
+
+            {/* Video Layer: Full Screen when Active */}
+            <video 
+                ref={localVideoRef} 
+                muted 
+                autoPlay 
+                playsInline 
+                className={`absolute inset-0 w-full h-full object-cover z-0 transition-opacity duration-500 ${videoMode !== 'off' ? 'opacity-100' : 'opacity-0'}`} 
+            />
+
+            <canvas ref={canvasRef} className="hidden" />
+
+            {/* HEADER - App Name Small & Colored - NO DOT */}
+            <div className="absolute top-6 left-0 right-0 flex flex-col items-center justify-start z-10 pointer-events-none">
+                <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500 drop-shadow-sm tracking-wide">
+                    {T.appName}
+                </h2>
+                {errorMsg && (
+                    <div className="mt-2 bg-red-500/90 text-white px-3 py-1 rounded-full text-xs font-bold shadow-lg backdrop-blur-md">
+                        {errorMsg}
                     </div>
                 )}
             </div>
 
-            {/* HEADER BRANDING - CLEANED UP (No Status Text below) */}
-            <div className="absolute top-8 left-0 right-0 z-[80] flex justify-center pointer-events-none">
-                <div className="bg-black/20 backdrop-blur-xl px-8 py-3 rounded-full border border-white/5 shadow-2xl">
-                    <h1 className="text-sm font-extrabold tracking-[0.2em] bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 via-blue-500 to-purple-600 drop-shadow-sm">
-                        GMANOOY
-                    </h1>
+            {/* MAIN CONTENT AREA */}
+            <div className="flex-1 relative flex flex-col items-center justify-center p-4 z-10 pointer-events-none">
+                <div className="pointer-events-auto flex flex-col items-center gap-4 w-full">
+                    {youtubeEmbedUrl && (
+                        <div className="relative w-full max-w-lg aspect-video rounded-xl overflow-hidden shadow-2xl border border-gray-700/50 bg-black animate-in zoom-in duration-300">
+                            <button onClick={() => setYoutubeEmbedUrl(null)} className="absolute top-2 right-2 bg-black/60 text-white p-1 rounded-full z-20 hover:bg-red-500/80 transition-colors"><XMarkIcon className="w-5 h-5"/></button>
+                            <iframe src={youtubeEmbedUrl} className="w-full h-full" frameBorder="0" allow="autoplay; encrypted-media" allowFullScreen></iframe>
+                        </div>
+                    )}
+                    
+                    {liveGeneratedVideo && !youtubeEmbedUrl && (
+                        <div className="relative w-full max-w-md aspect-square rounded-xl overflow-hidden shadow-2xl border border-white/10 animate-in zoom-in duration-500 bg-black">
+                             <video src={liveGeneratedVideo} autoPlay loop muted playsInline className="w-full h-full object-cover" />
+                             <button onClick={() => setLiveGeneratedVideo(null)} className="absolute top-2 right-2 bg-black/50 hover:bg-black/80 text-white p-1 rounded-full backdrop-blur-md"><XMarkIcon className="w-5 h-5"/></button>
+                        </div>
+                    )}
+
+                    {liveGeneratedImage && !youtubeEmbedUrl && !liveGeneratedVideo && (
+                        <div className="relative w-full max-w-md aspect-square rounded-xl overflow-hidden shadow-2xl border border-white/10 animate-in zoom-in duration-500">
+                            <img src={liveGeneratedImage} alt="Live Generated" className="w-full h-full object-cover" />
+                            <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-black/80 to-transparent p-4 flex justify-between items-end">
+                                <a href={liveGeneratedImage} download={`live-gen-${Date.now()}.png`} className="p-2 bg-white/20 hover:bg-white/40 rounded-full backdrop-blur-md transition-colors"><DownloadIcon className="w-5 h-5" /></a>
+                            </div>
+                            <button onClick={() => setLiveGeneratedImage(null)} className="absolute top-2 right-2 bg-black/50 hover:bg-black/80 text-white p-1 rounded-full backdrop-blur-md"><XMarkIcon className="w-5 h-5"/></button>
+                        </div>
+                    )}
+                    
+                    {suggestedLinks.length > 0 && (
+                        <div className="absolute right-4 bottom-32 flex flex-col gap-2 items-end max-w-[200px] pointer-events-auto">
+                            {suggestedLinks.map((link, idx) => (
+                                <div key={idx} className="flex items-center gap-1 animate-in slide-in-from-right duration-300">
+                                    <a href={link.url} target="_blank" className="bg-black/60 backdrop-blur-md border border-gray-700 px-3 py-2 rounded-lg text-xs text-cyan-400 hover:bg-cyan-900/30 transition-colors flex items-center gap-2 shadow-lg">
+                                        <ShareIcon className="w-3 h-3" /><span className="truncate max-w-[120px]">{link.title}</span>
+                                    </a>
+                                    <button onClick={() => removeLink(idx)} className="bg-red-500/80 text-white p-1.5 rounded-full hover:bg-red-600 transition-colors shadow-lg backdrop-blur-sm">
+                                        <XMarkIcon className="w-3 h-3" />
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             </div>
 
-            {/* FLOATING LINK CARDS (Right Side) */}
-            {suggestedLinks.length > 0 && (
-                <div className="absolute top-24 right-4 z-[80] flex flex-col items-end gap-3 pointer-events-none w-full max-w-[280px]">
-                    <div className="bg-black/40 backdrop-blur-xl border border-white/10 p-3 rounded-2xl flex flex-col gap-2 w-full animate-in slide-in-from-right-10 pointer-events-auto shadow-2xl">
-                         <div className="flex justify-between items-center pb-2 border-b border-white/10">
-                            <span className="text-[10px] font-bold text-cyan-400 uppercase tracking-widest">Resources</span>
-                            <button onClick={() => setSuggestedLinks([])} className="text-gray-400 hover:text-white"><XMarkIcon className="w-4 h-4" /></button>
-                         </div>
-                         <div className="flex flex-col gap-2 max-h-40 overflow-y-auto pr-1 custom-scrollbar">
-                            {suggestedLinks.map((link, idx) => (
-                                <a key={idx} href={link.url} target="_blank" rel="noopener noreferrer" className="bg-white/5 hover:bg-cyan-500/20 border border-white/5 p-2 rounded-xl flex items-center gap-3 transition-all group">
-                                    <div className="bg-black/50 p-1.5 rounded-lg text-cyan-400"><ShareIcon className="w-3 h-3" /></div>
-                                    <div className="flex flex-col overflow-hidden">
-                                        <span className="text-xs font-bold text-white truncate">{link.title}</span>
-                                        <span className="text-[9px] text-gray-400 truncate opacity-70">{link.url}</span>
-                                    </div>
-                                </a>
-                            ))}
-                         </div>
-                    </div>
-                </div>
-            )}
-
-            {/* YOUTUBE VIDEO OVERLAY (Center) */}
-            {youtubeEmbedUrl && (
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[90%] md:w-[600px] z-[85] animate-in zoom-in-95 fade-in duration-300">
-                    <div className="relative aspect-video bg-black rounded-2xl overflow-hidden shadow-2xl border border-cyan-500/30 ring-1 ring-white/10">
-                        <iframe 
-                            width="100%" 
-                            height="100%" 
-                            src={youtubeEmbedUrl} 
-                            title="YouTube" 
-                            frameBorder="0" 
-                            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
-                            allowFullScreen
-                            className="absolute inset-0"
-                        />
-                        <button onClick={() => setYoutubeEmbedUrl(null)} className="absolute -top-3 -right-3 bg-red-600 text-white rounded-full p-2 hover:bg-red-700 shadow-lg scale-90 hover:scale-100 z-10"><XMarkIcon className="w-4 h-4" /></button>
-                    </div>
-                </div>
-            )}
-
-            {/* GENERATED IMAGE OVERLAY */}
-            {liveGeneratedImage && (
-                <div className="absolute inset-0 z-[90] flex items-center justify-center p-6 bg-black/80 backdrop-blur-md animate-in zoom-in-95 duration-300">
-                    <div className="relative max-w-md w-full bg-gray-900 rounded-2xl overflow-hidden shadow-2xl border border-cyan-500/50">
-                        <div className="absolute top-0 w-full p-4 flex justify-between items-start bg-gradient-to-b from-black/60 to-transparent">
-                             <span className="text-[10px] font-bold text-white bg-cyan-600 px-2 py-1 rounded">AI GENERATED</span>
-                             <button onClick={() => setLiveGeneratedImage(null)} className="bg-black/50 text-white rounded-full p-2 hover:bg-red-500 transition-colors"><XMarkIcon className="w-5 h-5" /></button>
-                        </div>
-                        <img src={liveGeneratedImage} alt="AI Generated" className="w-full h-auto object-contain" />
-                        <div className="p-4 bg-gray-900 flex justify-center">
-                            <a href={liveGeneratedImage} download="gmanooy-gen.png" className="flex items-center gap-2 bg-cyan-600 hover:bg-cyan-500 text-white px-6 py-2 rounded-full font-bold text-sm shadow-lg"><DownloadIcon className="w-4 h-4" /> Download</a>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* ERROR MESSAGE */}
-            {errorMsg && (
-                <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[100] bg-red-600/90 backdrop-blur-md px-6 py-2 rounded-full text-white text-xs font-bold shadow-xl animate-in fade-in flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-white animate-pulse"></span> {errorMsg}
-                </div>
-            )}
-
-            {/* BOTTOM CONTROLS */}
-            <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-[90] w-full max-w-md px-4">
-                <div className="flex items-center justify-between gap-2 px-6 py-3 bg-gray-950/60 backdrop-blur-xl rounded-[2.5rem] border border-white/10 shadow-2xl">
-                    <button 
-                        onClick={() => { if(audioStreamRef.current) { audioStreamRef.current.getAudioTracks().forEach(t => t.enabled = !t.enabled); setIsMuted(!isMuted); }}} 
-                        className={`p-3 rounded-full transition-all active:scale-95 ${isMuted ? 'bg-red-500/20 text-red-500' : 'hover:bg-white/10 text-white'}`}
-                    >
-                        <Control3DIcon icon="mic" active={!isMuted} size="w-10 h-10" />
+            {/* CONTROLS - Oval Container */}
+            <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-30 pointer-events-auto w-max max-w-[90%]">
+                <div 
+                    className="flex items-center gap-5 bg-gray-900/60 backdrop-blur-xl border border-white/10 px-6 py-3 rounded-full shadow-2xl transition-all duration-300"
+                    dir="ltr"
+                >
+                    
+                    {/* End Call - Leftmost */}
+                    <button onClick={handleDisconnect} className="transform hover:scale-110 active:scale-95 transition-all">
+                        <EndCall3DIcon size="w-10 h-10" />
                     </button>
-                    <button 
-                        onClick={() => setVideoMode(prev => prev === 'camera' ? 'off' : 'camera')} 
-                        disabled={videoMode === 'screen'} 
-                        className={`p-3 rounded-full transition-all active:scale-95 ${videoMode === 'camera' ? 'bg-white/20' : 'hover:bg-white/10'}`}
-                    >
-                        <Control3DIcon icon="cam" active={videoMode === 'camera'} size="w-10 h-10" />
+
+                    {/* Screen Share - Moved to left/middle area */}
+                    <button onClick={toggleScreenShare} className="transform hover:scale-110 active:scale-95 transition-all">
+                        <Control3DIcon icon="share" active={videoMode === 'screen'} size="w-9 h-9" />
                     </button>
+
+                    {/* Camera */}
+                    <button onClick={() => {
+                        if (videoMode === 'camera') setVideoMode('off');
+                        else { setVideoMode('camera'); /* Keep existing facing mode */ }
+                    }} className="transform hover:scale-110 active:scale-95 transition-all">
+                        <Control3DIcon icon="cam" active={videoMode === 'camera'} size="w-9 h-9" />
+                    </button>
+
+                    {/* Flip Camera - Appears when camera is active */}
                     {videoMode === 'camera' && (
-                        <button 
+                         <button 
                             onClick={() => setCurrentFacingMode(prev => prev === 'user' ? 'environment' : 'user')} 
-                            className="p-3 rounded-full hover:bg-white/10 transition-all active:scale-95 animate-in zoom-in"
+                            className="transform hover:scale-110 active:scale-95 transition-all animate-in zoom-in duration-300"
                         >
-                            <Control3DIcon icon="switch" size="w-10 h-10" />
+                            <Control3DIcon icon="switch" active={false} size="w-9 h-9" />
                         </button>
                     )}
-                    <button 
-                        onClick={toggleScreenShare} 
-                        className={`p-3 rounded-full transition-all active:scale-95 ${videoMode === 'screen' ? 'bg-green-500/20 text-green-400' : 'hover:bg-white/10'}`}
-                    >
-                        <Control3DIcon icon="share" active={videoMode === 'screen'} size="w-10 h-10" />
+
+                    {/* Mic - Moved to Rightmost */}
+                    <button onClick={() => {
+                        const tracks = audioStreamRef.current?.getAudioTracks();
+                        if (tracks) { tracks.forEach(t => t.enabled = isMuted); setIsMuted(!isMuted); }
+                    }} className="transform hover:scale-110 active:scale-95 transition-all">
+                        <Control3DIcon icon="mic" active={!isMuted} size="w-9 h-9" />
                     </button>
-                    <div className="w-[1px] h-8 bg-white/10 mx-1"></div>
-                    <button onClick={handleClose} className="transition-transform hover:scale-110 active:scale-95"><EndCall3DIcon size="w-14 h-14" /></button>
                 </div>
             </div>
-            <canvas ref={canvasRef} className="hidden" />
         </div>
     );
 };

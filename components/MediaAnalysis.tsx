@@ -155,7 +155,7 @@ const MediaAnalysis: React.FC<MediaAnalysisProps> = ({ theme, T, effectiveAppLan
                 {/* Action Button - Visible whenever file is uploaded, regardless of previous result */}
                 {mediaFile && (
                     <button onClick={handleAnalyze} disabled={isLoading} className={buttonClasses}>
-                        {isLoading ? <><Spinner /> Analyzing Media...</> : T.analyzeButton}
+                        {isLoading ? <><Spinner /> Smart Analysis...</> : T.analyzeButton}
                     </button>
                 )}
 
@@ -189,7 +189,7 @@ const MediaAnalysis: React.FC<MediaAnalysisProps> = ({ theme, T, effectiveAppLan
                                         <span className={`text-xs font-bold px-2 py-0.5 rounded-md self-start ${speakerLabelClasses}`}>
                                             {line.speaker}
                                         </span>
-                                        <p className="text-sm md:text-base leading-relaxed pl-2 border-l-2 border-gray-500/20">
+                                        <p className="text-sm md:text-base leading-relaxed pl-2 border-l-2 border-gray-500/20 whitespace-pre-wrap">
                                             {line.text}
                                         </p>
                                     </div>

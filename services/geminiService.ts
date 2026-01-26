@@ -68,10 +68,10 @@ async function retryOperation<T>(operation: () => Promise<T>): Promise<T> {
 export function getOfflineResponse(query: string): string | null {
     const q = query.toLowerCase();
     if (q.includes('who are you') || q.includes('name') || q.includes('اسمك') || q.includes('مين انت')) {
-        return "I am **Gimanoui** (جمانوي). An intelligent AI developed by Mano Habib.";
+        return "I am **Gimanoui** (جمانوي). An intelligent AI developed by **Mano Habib**.";
     }
     if (q.includes('developer') || q.includes('made you') || q.includes('created') || q.includes('المطور') || q.includes('مين عملك')) {
-        return "I was developed by **Mano Habib**, an Egyptian developer.";
+        return "I was developed by **Mano Habib**.";
     }
     return null;
 }
@@ -81,12 +81,25 @@ export async function searchYoutubeVideoId(query: string): Promise<string | null
         const ai = getGenAI();
         const response = await ai.models.generateContent({
             model: 'gemini-3-flash-preview',
-            contents: `TASK: Find the OFFICIAL YouTube video ID for: "${query}". 
-            RULES: 1. Return ONLY the 11-char Video ID. 2. Must be OFFICIAL. 3. No text, just the ID.`,
+            contents: `TASK: Find the OFFICIAL YouTube video link for: "${query}". 
+            RULES: 
+            1. Use Google Search to find the real link.
+            2. Return ONLY the full valid YouTube URL (e.g., https://www.youtube.com/watch?v=...).
+            3. Do not invent links.`,
             config: { tools: [{ googleSearch: {} }], temperature: 0.1 }
         });
-        const id = response.text?.trim().replace(/[^a-zA-Z0-9_-]/g, '').substring(0, 11);
-        return id?.length === 11 ? id : null;
+        
+        // Extract URL from grounding chunks or text
+        let url = response.text?.trim();
+        const chunkUrl = response.candidates?.[0]?.groundingMetadata?.groundingChunks?.find((c: any) => c.web?.uri?.includes('youtube.com') || c.web?.uri?.includes('youtu.be'))?.web?.uri;
+        
+        if (chunkUrl) url = chunkUrl;
+
+        if (url) {
+            const match = url.match(/(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|v\/)|youtu\.be\/)([\w-]{11})/);
+            return match ? match[1] : null;
+        }
+        return null;
     } catch (e) { return null; }
 }
 
@@ -102,13 +115,17 @@ export async function getCorrectedText(text: string, language: string): Promise<
             model: 'gemini-3-flash-preview',
             contents: text,
             config: { 
-                systemInstruction: `You are an expert Editor. 
-                TASK: Rewrite the text to be authentic and grammatically correct in its original language/dialect.
-                If it is Egyptian Arabic, use Egyptian Masri.`,
-                temperature: 0.3 
+                systemInstruction: `ROLE: Strict Proofreader & Diacritics Expert.
+TASK: Correct spelling/grammar errors ONLY. Do NOT change words, style, or meaning.
+RULES:
+1. **Preserve Content**: Keep the user's original words and sentence structure exactly as is, unless there is a clear spelling mistake.
+2. **No Rewriting**: Do NOT paraphrase. Do NOT add new text.
+3. **Egyptian Arabic**: If the text is in Egyptian Arabic, add necessary diacritics (Tashkeel) to ensure correct pronunciation in the Egyptian dialect.
+4. **Accuracy**: Only fix what is broken. If the text is correct, return it exactly as input.`,
+                temperature: 0.1 
             }
         });
-        return response.text || text;
+        return response.text?.trim() || text;
     } catch (e) { return text; }
 }
 
@@ -226,22 +243,28 @@ export async function* generateChatResponseStream(history: ChatMessage[], lastUs
             model: 'gemini-3-flash-preview',
             config: { 
                 systemInstruction: `
-                IDENTITY: You are **Gimanoui** (جمانوي), an intelligent AI assistant.
-                DEVELOPER: You were developed by **Mano Habib**, an Egyptian developer.
+                IDENTITY: You are **Gimanoui** (جمانوي), a highly intelligent, precise, and fast AI assistant.
+                DEVELOPER: Developed by **Mano Habib**.
                 
-                LANGUAGES: You support **ALL languages and dialects** worldwide.
-                - If the user speaks Egyptian Arabic, reply in **Egyptian Colloquial Arabic (Masri)**.
-                - If the user speaks English, French, Spanish, or ANY other language/dialect, reply in the **SAME language/dialect** they used.
-                - Do NOT restrict yourself to Arabic only.
+                CORE BEHAVIOR:
+                1. **Accuracy & Speed**: Provide direct, correct, and high-quality answers immediately.
+                2. **Connectivity**: You are always connected to the internet. 
+                3. **Music & Video**: If the user asks for a song or video, you MUST use the Google Search tool to find the **official** YouTube link and provide it in your response. Ensure the link is valid (e.g., https://www.youtube.com/watch?v=...).
                 
-                CAPABILITIES: Google Search, Image Generation, YouTube Search.
-                RULES: 
-                - If asked for news/info, use Google Search.
-                - If asked for a song/video, find a valid YouTube link using search.
-                - If asked to generate an image, output [GENERATE_IMAGE: <prompt>] in the text.
+                LANGUAGE:
+                   - **EGYPTIAN ARABIC (Masri)**: If the user speaks Arabic, reply in authentic Egyptian Colloquial Arabic.
+                   - **Other Languages**: Reply in the exact same language/dialect as the user.
+                
+                CAPABILITIES:
+                - **Voice Interaction**: Speak if asked.
+                - **Image Generation**: If asked to "draw" or "generate image", output [GENERATE_IMAGE: <prompt>].
+                - **GIF/Animation**: If asked for a "GIF", "Animation", or "Moving Image", output [GENERATE_GIF: <prompt>].
+                - **Search**: Use Google Search for news, facts, weather, and media links.
+                
+                TONE: Smart, helpful, friendly, and efficient.
                 `, 
                 tools: [{googleSearch: {}}], 
-                temperature: 0.6 
+                temperature: 0.5
             },
             history: history.map(h => ({ role: h.role, parts: [{ text: h.text }] }))
         });
@@ -273,6 +296,37 @@ export async function generateImage(p: string, ar: string): Promise<string | nul
     } catch (e) { throw new Error(formatGenAIError(e)); }
 }
 
+export async function generateVideo(p: string): Promise<string | null> {
+    // Generate a short video/GIF using Veo
+    try {
+        const ai = getGenAI();
+        // Veo model for fast generation
+        let operation = await ai.models.generateVideos({
+            model: 'veo-3.1-fast-generate-preview',
+            prompt: p,
+            config: {
+                numberOfVideos: 1,
+                resolution: '720p',
+                aspectRatio: '1:1' 
+            }
+        });
+        
+        // Poll for completion
+        while (!operation.done) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            operation = await ai.operations.getVideosOperation({operation: operation});
+        }
+        
+        // Return the video URI
+        const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
+        // Append API key for access if needed, or handle in frontend component
+        return videoUri ? `${videoUri}&key=${getApiKey()}` : null;
+    } catch (e) {
+        console.error("Video Gen Error", e);
+        return null;
+    }
+}
+
 export async function editImage(imgs: any[], p: string): Promise<string | null> {
     try {
         const ai = getGenAI();
@@ -288,8 +342,20 @@ export async function analyzeMediaContent(b64: string, mt: string): Promise<Anal
         const ai = getGenAI();
         const resp: GenerateContentResponse = await ai.models.generateContent({
             model: 'gemini-3-flash-preview',
-            contents: { parts: [{ inlineData: { data: b64, mimeType: mt } }, { text: "Analyze media into JSON summary and transcript." }] },
-            config: { responseMimeType: "application/json" }
+            contents: {
+                parts: [
+                    { inlineData: { data: b64, mimeType: mt } },
+                    { text: `
+                        TASK: Perform an advanced, highly accurate linguistic analysis and transcription of this media.
+                        OUTPUT FORMAT: JSON
+                        { "summary": "...", "transcript": [{ "speaker": "...", "text": "..." }] }
+                    ` }
+                ]
+            },
+            config: { 
+                responseMimeType: "application/json",
+                temperature: 0.2 
+            }
         });
         return JSON.parse(cleanJson(resp.text || "{}"));
     } catch (e) { throw new Error(formatGenAIError(e)); }

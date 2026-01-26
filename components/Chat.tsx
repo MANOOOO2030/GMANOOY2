@@ -1,8 +1,8 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import type { ChatMessage, Voice, SpeechRecognition, GroundingSource } from '../types';
-import { generateChatResponseStream, generateImage, generateSpeech, decode, decodeAudioData, getOfflineResponse } from '../services/geminiService';
-import { SendIcon, MicrophoneIcon, Spinner, UploadIcon, SpeakerWaveIcon, ClipboardIcon, XMarkIcon, StartLiveIcon } from './IconComponents';
+import { generateChatResponseStream, generateImage, generateVideo, generateSpeech, decode, decodeAudioData, getOfflineResponse } from '../services/geminiService';
+import { SendIcon, MicrophoneIcon, Spinner, UploadIcon, SpeakerWaveIcon, ClipboardIcon, XMarkIcon, StartLiveIcon, DownloadIcon } from './IconComponents';
 
 const mapLanguageToCode = (lang: string): string => {
     const map: Record<string, string> = { 'Egyptian Arabic': 'ar-EG', 'English (US)': 'en-US', 'Spanish': 'es-ES', 'French': 'fr-FR' };
@@ -21,6 +21,8 @@ const fileToBase64 = (file: File): Promise<string> => {
 const cleanTextForSpeech = (text: string): string => {
     if (!text) return "";
     let cleaned = text;
+    // Remove URLs for speech
+    cleaned = cleaned.replace(/(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?v=|embed\/|v\/)|youtu\.be\/)([\w-]{11})/gi, ' video link ');
     cleaned = cleaned.replace(/(?:https?:\/\/|www\.)[^\s]+/g, '');
     cleaned = cleaned.replace(/[a-zA-Z0-9-]+\.(com|org|net|io)\/[^\s]*/g, '');
     cleaned = cleaned.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
@@ -41,7 +43,7 @@ interface ChatProps {
   isActive: boolean;
 }
 
-const Chat: React.FC<ChatProps> = ({ selectedVoice, theme, T, onStartLiveChat, audioContext, messages, setMessages }) => {
+const Chat: React.FC<ChatProps> = ({ selectedVoice, theme, T, onStartLiveChat, audioContext, messages, setMessages, isActive }) => {
     const [input, setInput] = useState('');
     const [media, setMedia] = useState<{ base64: string; mimeType: string; preview: string } | null>(null);
     const [isLoading, setIsLoading] = useState(false);
@@ -74,6 +76,13 @@ const Chat: React.FC<ChatProps> = ({ selectedVoice, theme, T, onStartLiveChat, a
         isPlayingQueueRef.current = false;
         setSpeakingMessageId(null);
     }, []);
+
+    // Stop audio when component becomes inactive (e.g., navigating to Live Chat)
+    useEffect(() => {
+        if (!isActive) {
+            stopAudio();
+        }
+    }, [isActive, stopAudio]);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -138,57 +147,59 @@ const Chat: React.FC<ChatProps> = ({ selectedVoice, theme, T, onStartLiveChat, a
             const stream = generateChatResponseStream(history, userMessage, "");
             const modelMessageId = `model-${Date.now()}`;
             setMessages(prev => [...prev, { id: modelMessageId, role: 'model', text: '' }]);
-            setSpeakingMessageId(modelMessageId);
             
             let fullText = '';
-            let textBuffer = '';
-            const streamId = currentStreamIdRef.current;
-            let isImageGen = false;
-
+            
             for await (const chunk of stream) {
                 if (chunk.error) { setError(chunk.error); break; }
                 if (chunk.text) {
                     fullText += chunk.text;
-                    textBuffer += chunk.text;
-                    if (fullText.includes('GENERATE_IMAGE:')) { isImageGen = true; stopAudio(); }
                     
-                    if (!isImageGen) {
-                        const match = textBuffer.match(/([.!?؟\n]+)/);
-                        if (match && match.index !== undefined) {
-                            const sentence = textBuffer.substring(0, match.index + match[0].length);
-                            textBuffer = textBuffer.substring(match.index + match[0].length);
-                            const speakText = cleanTextForSpeech(sentence);
-                            if (speakText) {
-                                audioQueueRef.current.push(generateSpeech(speakText, selectedVoice.apiName, selectedVoice.language).then(async b64 => {
-                                    if (streamId !== currentStreamIdRef.current || !b64 || !audioContext) return null;
-                                    const buffer = await decodeAudioData(decode(b64), audioContext, 24000, 1);
-                                    return { buffer, streamId };
-                                }));
-                                processAudioQueue();
-                            }
-                        }
+                    // Check for GIF generation command
+                    if (fullText.includes('[GENERATE_GIF:')) { 
+                        stopAudio();
+                        break; // Stop stream to handle GIF
                     }
+                     // Check for Image generation command
+                    if (fullText.includes('[GENERATE_IMAGE:')) { 
+                        stopAudio();
+                        break; 
+                    }
+
                     setMessages(prev => prev.map(m => m.id === modelMessageId ? { ...m, text: fullText, groundingSources: chunk.groundingSources || m.groundingSources } : m));
                 }
             }
-            if (!isImageGen && textBuffer.trim()) {
-                 const speakText = cleanTextForSpeech(textBuffer);
-                 if (speakText) {
-                    audioQueueRef.current.push(generateSpeech(speakText, selectedVoice.apiName, selectedVoice.language).then(async b64 => {
-                        if (streamId !== currentStreamIdRef.current || !b64 || !audioContext) return null;
-                        const buffer = await decodeAudioData(decode(b64), audioContext, 24000, 1);
-                        return { buffer, streamId };
-                    }));
-                    processAudioQueue();
-                 }
-            }
 
-            if (fullText.includes('GENERATE_IMAGE:')) {
-                const prompt = fullText.split('GENERATE_IMAGE:')[1].replace(']', '').trim();
+            // Handle GIF Command (using Veo for looping video)
+            if (fullText.includes('[GENERATE_GIF:')) {
+                const prompt = fullText.split('[GENERATE_GIF:')[1].replace(']', '').trim();
+                const vidId = `vid-${Date.now()}`;
+                const cleanText = fullText.replace(/\[GENERATE_GIF:.*?\]/, '').trim();
+                
+                setMessages(prev => prev.map(m => m.id === modelMessageId ? { id: vidId, role: 'model', text: cleanText + (cleanText ? '\n\n' : '') + "Creating GIF Animation..." } : m));
+                
+                const videoUrl = await generateVideo(prompt);
+                
+                if (videoUrl) {
+                    setMessages(prev => prev.map(m => m.id === vidId ? { 
+                        ...m, 
+                        text: cleanText, 
+                        // Store video URL in a way we can render it. Using media array for consistency but mimeType 'video/mp4'
+                        media: [{ base64: videoUrl, mimeType: 'video/mp4' }] 
+                    } : m));
+                } else {
+                     setMessages(prev => prev.map(m => m.id === vidId ? { ...m, text: cleanText + "\n(Failed to generate GIF)" } : m));
+                }
+            }
+            // Handle Static Image Command
+            else if (fullText.includes('[GENERATE_IMAGE:')) {
+                const prompt = fullText.split('[GENERATE_IMAGE:')[1].replace(']', '').trim();
                 const imgId = `img-${Date.now()}`;
-                setMessages(prev => prev.map(m => m.id === modelMessageId ? { id: imgId, role: 'model', text: T.imageGeneratorLoadingMessage } : m));
+                const cleanText = fullText.replace(/\[GENERATE_IMAGE:.*?\]/, '').trim();
+
+                setMessages(prev => prev.map(m => m.id === modelMessageId ? { id: imgId, role: 'model', text: cleanText + (cleanText ? '\n\n' : '') + T.imageGeneratorLoadingMessage } : m));
                 const imgData = await generateImage(prompt, '1:1');
-                if (imgData) setMessages(prev => prev.map(m => m.id === imgId ? { ...m, text: '', media: [{ base64: imgData, mimeType: 'image/png' }] } : m));
+                if (imgData) setMessages(prev => prev.map(m => m.id === imgId ? { ...m, text: cleanText, media: [{ base64: imgData, mimeType: 'image/png' }] } : m));
             }
 
         } catch (e: any) { setError(e.message); } finally { setIsLoading(false); }
@@ -244,29 +255,45 @@ const Chat: React.FC<ChatProps> = ({ selectedVoice, theme, T, onStartLiveChat, a
                 src.onended = () => setSpeakingMessageId(null);
             }
         } catch(e) {} finally { setIsSpeechLoading(null); }
-    }, [audioContext, selectedVoice]);
+    }, [audioContext, selectedVoice, stopAudio]);
 
     const renderMessageContent = (text: string) => {
-        const parts = text.split(/(https?:\/\/[^\s]+)/g);
+        // Updated Regex to split by ANY URL
+        const parts = text.split(/((?:https?:\/\/|www\.)[^\s]+)/g);
+        
         return parts.map((part, i) => {
-            if (part.match(/^https?:\/\//)) {
-                // YouTube Embed
-                const ytMatch = part.match(/(?:https?:\/\/)?(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)([\w-]{11})/);
+            // Check if part is a URL
+            if (part.match(/^(?:https?:\/\/|www\.)/)) {
+                let href = part;
+                if (!href.startsWith('http')) href = 'https://' + href;
+
+                const ytMatch = part.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|v\/)|youtu\.be\/)([\w-]{11})/);
+                
                 if (ytMatch && ytMatch[1]) {
                      return (
-                         <div key={i} className="my-2 rounded-xl overflow-hidden shadow-lg border border-gray-700/50 w-full max-w-[320px] aspect-video">
-                             <iframe src={`https://www.youtube.com/embed/${ytMatch[1]}`} className="w-full h-full" frameBorder="0" allowFullScreen></iframe>
+                         <div key={i} className="my-2 rounded-xl overflow-hidden shadow-lg border border-gray-700/50 w-full max-w-[320px] aspect-video bg-black">
+                             <iframe 
+                                src={`https://www.youtube.com/embed/${ytMatch[1]}`} 
+                                className="w-full h-full" 
+                                frameBorder="0" 
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                                allowFullScreen
+                            ></iframe>
                          </div>
                      );
                 }
-                // Generic Link
+                
+                // Generic Link Check - Make it clickable
                 try {
-                    const u = new URL(part);
                     // Audio Check
                     if (part.match(/\.(mp3|wav|ogg)$/i)) {
                          return <audio key={i} controls src={part} className="w-full mt-2" />;
                     }
-                    return <a key={i} href={part} target="_blank" rel="noreferrer" className="text-cyan-400 underline break-all hover:text-cyan-300">{u.hostname}{u.pathname}</a>;
+                     // Video Check (MP4 etc) - helpful for Veo outputs
+                    if (part.match(/\.(mp4|webm)$/i) || part.includes('googlevideo.com')) {
+                        return <video key={i} src={part} controls className="w-full mt-2 rounded-lg" />;
+                    }
+                    return <a key={i} href={href} target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline break-all hover:text-cyan-300">{part}</a>;
                 } catch(e) { return part; }
             }
             return part;
@@ -276,16 +303,50 @@ const Chat: React.FC<ChatProps> = ({ selectedVoice, theme, T, onStartLiveChat, a
     return (
         <div className="flex flex-col h-full w-full">
             {selectedImage && (
-                <div className="fixed inset-0 bg-black/90 z-[70] flex items-center justify-center p-4" onClick={() => setSelectedImage(null)}>
+                <div className="fixed inset-0 bg-black/90 z-[70] flex items-center justify-center p-4">
                     <img src={selectedImage} className="max-h-[90vh] max-w-full rounded-xl" />
-                    <button className="absolute top-4 right-4 bg-gray-800 text-white p-2 rounded-full"><XMarkIcon /></button>
+                    {/* Control Buttons Container */}
+                    <div className="absolute top-4 right-4 flex gap-3">
+                        <a 
+                            href={selectedImage} 
+                            download={`gmanooy-image-${Date.now()}.png`} 
+                            className="bg-gray-800/80 text-white p-2 rounded-full hover:bg-gray-700 transition-colors backdrop-blur-md flex items-center gap-1"
+                            title="Download/Upload Image"
+                        >
+                            <DownloadIcon className="w-6 h-6" />
+                        </a>
+                        <button 
+                            onClick={() => setSelectedImage(null)} 
+                            className="bg-gray-800/80 text-white p-2 rounded-full hover:bg-red-600/80 transition-colors backdrop-blur-md"
+                            title="Close"
+                        >
+                            <XMarkIcon className="w-6 h-6" />
+                        </button>
+                    </div>
                 </div>
             )}
             <div className="flex-1 overflow-y-auto p-3 space-y-4 scrollbar-hide">
                 {messages.map((msg) => (
                     <div key={msg.id} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
                         <div className={`max-w-[85%] p-3.5 rounded-2xl ${msg.role === 'user' ? 'bg-cyan-600 text-white' : (theme === 'dark' ? 'bg-[#1e1e1e] text-white border border-gray-700' : 'bg-white text-black border border-gray-200')}`}>
-                            {msg.media?.map((m, i) => <img key={i} src={`data:${m.mimeType};base64,${m.base64}`} onClick={() => setSelectedImage(`data:${m.mimeType};base64,${m.base64}`)} className="rounded-lg mb-2 cursor-pointer w-full" />)}
+                            {msg.media?.map((m, i) => {
+                                if (m.mimeType === 'video/mp4') {
+                                    // Render generated video (GIF)
+                                    return (
+                                        <div key={i} className="rounded-lg mb-2 overflow-hidden border border-gray-600">
+                                            <video 
+                                                src={m.base64} // URL is stored in base64 field for convenience
+                                                autoPlay 
+                                                loop 
+                                                muted 
+                                                playsInline 
+                                                className="w-full" 
+                                            />
+                                        </div>
+                                    )
+                                }
+                                return <img key={i} src={`data:${m.mimeType};base64,${m.base64}`} onClick={() => setSelectedImage(`data:${m.mimeType};base64,${m.base64}`)} className="rounded-lg mb-2 cursor-pointer w-full" />
+                            })}
                             <div className="whitespace-pre-wrap text-sm leading-relaxed">{renderMessageContent(msg.text)}</div>
                             {msg.groundingSources?.map((s, i) => (
                                 <a key={i} href={s.uri} target="_blank" className="block text-xs text-cyan-400 mt-2 hover:underline truncate bg-black/20 p-1.5 rounded flex items-center gap-1">🌐 {s.title}</a>

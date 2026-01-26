@@ -26,7 +26,10 @@ const App: React.FC = () => {
     const T = useMemo(() => translations[appLanguage as keyof typeof translations] || translations.ar, [appLanguage]);
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [imageGenState, setImageGenState] = useState<ImageGenState>(initialImageGenState);
-    const [resetTrigger, setResetTrigger] = useState<number>(0);
+    
+    // Independent reset triggers for each section
+    const [soundResetTrigger, setSoundResetTrigger] = useState<number>(0);
+    const [analysisResetTrigger, setAnalysisResetTrigger] = useState<number>(0);
     
     // Updated default voice to Layla (Female)
     const [selectedVoice, setSelectedVoice] = useState<Voice>(() => {
@@ -65,46 +68,136 @@ const App: React.FC = () => {
         if (v) { setSelectedVoice(v); localStorage.setItem('gmanooy_voice', id); playGreeting(v); }
     };
 
+    const handleNewChat = () => {
+        if (currentPage === Page.Chat) {
+            setMessages([]);
+        } else if (currentPage === Page.Pictures) {
+            setImageGenState(initialImageGenState);
+        } else if (currentPage === Page.Sound) {
+            setSoundResetTrigger(prev => prev + 1);
+        } else if (currentPage === Page.Analysis) {
+            setAnalysisResetTrigger(prev => prev + 1);
+        }
+    };
+
+    const navButtonClass = (isActive: boolean) => 
+        `flex flex-col items-center justify-center gap-1 w-full py-2 transition-colors ${isActive ? 'text-cyan-400' : 'text-gray-500 hover:text-gray-400'}`;
+
     return (
         <div className="h-[100dvh] flex flex-col overflow-hidden" onClick={initAudio}>
             <IconDefs />
-            <header className={`flex justify-between items-center p-2 border-b ${theme === 'dark' ? 'border-gray-800 bg-black/90' : 'bg-white border-gray-200'}`}>
-                <button 
-                    onClick={() => { if(currentPage === Page.Chat) setMessages([]); else if(currentPage === Page.Sound) setResetTrigger(Date.now()); }}
-                    className="flex flex-col items-center gap-0.5 p-1 rounded-lg text-cyan-400 active:scale-95 transition-transform"
-                >
-                    <NewChatIcon className="w-5 h-5"/>
-                    <span className="text-[10px] font-bold">{T.headerNewChat}</span>
-                </button>
-                <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{T.appName}</h1>
-                <SettingsMenu 
-                    theme={theme} 
-                    setTheme={setTheme} 
-                    selectedVoice={selectedVoice} 
-                    appLanguage={appLanguage} 
-                    effectiveAppLanguage={appLanguage} 
-                    setAppLanguage={setAppLanguage} 
-                    onVoiceChange={handleVoiceChange} 
-                    playGreeting={playGreeting} 
-                    installPrompt={deferredPrompt} 
-                    onInstall={() => deferredPrompt?.prompt()} 
-                    T={T} 
-                    menuPosition="top" // Expands downward
-                />
-            </header>
+            
+            {/* Header - Hidden when in Live Chat */}
+            {currentPage !== Page.Live && (
+                <header className={`flex justify-between items-center p-2 border-b z-20 ${theme === 'dark' ? 'border-gray-800 bg-black/90' : 'bg-white border-gray-200'}`}>
+                    <button 
+                        onClick={handleNewChat}
+                        className="flex flex-col items-center gap-0.5 p-1 rounded-lg text-cyan-400 active:scale-95 transition-transform"
+                    >
+                        <NewChatIcon className="w-5 h-5"/>
+                        <span className="text-[10px] font-bold">{T.headerNewChat}</span>
+                    </button>
+                    <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{T.appName}</h1>
+                    <SettingsMenu 
+                        theme={theme} 
+                        setTheme={setTheme} 
+                        selectedVoice={selectedVoice} 
+                        appLanguage={appLanguage} 
+                        effectiveAppLanguage={appLanguage} 
+                        setAppLanguage={setAppLanguage} 
+                        onVoiceChange={handleVoiceChange} 
+                        playGreeting={playGreeting} 
+                        installPrompt={deferredPrompt} 
+                        onInstall={() => deferredPrompt?.prompt()} 
+                        T={T} 
+                        menuPosition="top" // Expands downward
+                    />
+                </header>
+            )}
+            
             <main className="flex-1 relative overflow-hidden">
-                {currentPage === Page.Chat && <Chat selectedVoice={selectedVoice} theme={theme} T={T} onStartLiveChat={() => setCurrentPage(Page.Live)} audioContext={audioContext} messages={messages} setMessages={setMessages} effectiveAppLanguage={appLanguage} isActive={true} />}
-                {currentPage === Page.Pictures && <ImageGenerator theme={theme} T={T} effectiveAppLanguage={appLanguage} state={imageGenState} setState={setImageGenState} />}
-                {currentPage === Page.Sound && <SoundCreator selectedVoice={selectedVoice} audioContext={audioContext} theme={theme} T={T} playGreeting={playGreeting} resetTrigger={resetTrigger} />}
-                {currentPage === Page.Analysis && <MediaAnalysis theme={theme} T={T} effectiveAppLanguage={appLanguage} resetTrigger={resetTrigger} />}
-                {currentPage === Page.Live && <LiveChat selectedVoice={selectedVoice} T={T} onClose={() => setCurrentPage(Page.Chat)} setMessages={setMessages} />}
+                {/* 
+                   Render all main pages but toggle visibility using CSS.
+                   This preserves the state (input text, uploaded files, generated results)
+                   when navigating between tabs. 
+                */}
+                <div className={`h-full w-full ${currentPage === Page.Chat ? 'block' : 'hidden'}`}>
+                    <Chat 
+                        selectedVoice={selectedVoice} 
+                        theme={theme} 
+                        T={T} 
+                        onStartLiveChat={() => setCurrentPage(Page.Live)} 
+                        audioContext={audioContext} 
+                        messages={messages} 
+                        setMessages={setMessages} 
+                        effectiveAppLanguage={appLanguage} 
+                        isActive={currentPage === Page.Chat} 
+                    />
+                </div>
+                
+                <div className={`h-full w-full ${currentPage === Page.Pictures ? 'block' : 'hidden'}`}>
+                    <ImageGenerator 
+                        theme={theme} 
+                        T={T} 
+                        effectiveAppLanguage={appLanguage} 
+                        state={imageGenState} 
+                        setState={setImageGenState} 
+                    />
+                </div>
+
+                <div className={`h-full w-full ${currentPage === Page.Sound ? 'block' : 'hidden'}`}>
+                    <SoundCreator 
+                        selectedVoice={selectedVoice} 
+                        audioContext={audioContext} 
+                        theme={theme} 
+                        T={T} 
+                        playGreeting={playGreeting} 
+                        resetTrigger={soundResetTrigger} 
+                        isActive={currentPage === Page.Sound}
+                    />
+                </div>
+
+                <div className={`h-full w-full ${currentPage === Page.Analysis ? 'block' : 'hidden'}`}>
+                    <MediaAnalysis 
+                        theme={theme} 
+                        T={T} 
+                        effectiveAppLanguage={appLanguage} 
+                        resetTrigger={analysisResetTrigger} 
+                    />
+                </div>
+
+                {/* LiveChat is ephemeral and resource-heavy, so it is conditionally rendered */}
+                {currentPage === Page.Live && (
+                    <LiveChat 
+                        selectedVoice={selectedVoice} 
+                        T={T} 
+                        onClose={() => setCurrentPage(Page.Chat)} 
+                        setMessages={setMessages} 
+                    />
+                )}
             </main>
-            <nav className={`flex justify-around p-2 border-t ${theme === 'dark' ? 'bg-black border-gray-800' : 'bg-white border-gray-200'}`}>
-                <button onClick={() => setCurrentPage(Page.Chat)} className={currentPage === Page.Chat ? 'text-cyan-400' : 'text-gray-500'}><ChatIcon className="w-6 h-6"/><span className="text-[10px] block">{T.navChat}</span></button>
-                <button onClick={() => setCurrentPage(Page.Pictures)} className={currentPage === Page.Pictures ? 'text-cyan-400' : 'text-gray-500'}><CreatePicturesIcon className="w-6 h-6"/><span className="text-[10px] block">{T.navPictures}</span></button>
-                <button onClick={() => setCurrentPage(Page.Sound)} className={currentPage === Page.Sound ? 'text-cyan-400' : 'text-gray-500'}><CreateSoundIcon className="w-6 h-6"/><span className="text-[10px] block">{T.navSound}</span></button>
-                <button onClick={() => setCurrentPage(Page.Analysis)} className={currentPage === Page.Analysis ? 'text-cyan-400' : 'text-gray-500'}><AnalyzeMediaIcon className="w-6 h-6"/><span className="text-[10px] block">{T.navAnalysis}</span></button>
-            </nav>
+            
+            {/* Navigation Bar - Hidden when in Live Chat */}
+            {currentPage !== Page.Live && (
+                <nav className={`flex justify-around items-end pb-safe pt-2 border-t z-20 ${theme === 'dark' ? 'bg-black border-gray-800' : 'bg-white border-gray-200'}`}>
+                    <button onClick={() => setCurrentPage(Page.Chat)} className={navButtonClass(currentPage === Page.Chat)}>
+                        <ChatIcon className="w-6 h-6"/>
+                        <span className="text-[10px] font-medium leading-tight">{T.navChat}</span>
+                    </button>
+                    <button onClick={() => setCurrentPage(Page.Pictures)} className={navButtonClass(currentPage === Page.Pictures)}>
+                        <CreatePicturesIcon className="w-6 h-6"/>
+                        <span className="text-[10px] font-medium leading-tight">{T.navPictures}</span>
+                    </button>
+                    <button onClick={() => setCurrentPage(Page.Sound)} className={navButtonClass(currentPage === Page.Sound)}>
+                        <CreateSoundIcon className="w-6 h-6"/>
+                        <span className="text-[10px] font-medium leading-tight">{T.navSound}</span>
+                    </button>
+                    <button onClick={() => setCurrentPage(Page.Analysis)} className={navButtonClass(currentPage === Page.Analysis)}>
+                        <AnalyzeMediaIcon className="w-6 h-6"/>
+                        <span className="text-[10px] font-medium leading-tight">{T.navAnalysis}</span>
+                    </button>
+                </nav>
+            )}
         </div>
     );
 };
